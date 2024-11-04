@@ -1,0 +1,20 @@
+```{r}
+library(ade4)
+library(ClustOfVar)
+library(pls)
+library(glmnet)
+library(factoextra)
+library(Factoshiny)
+library(xtable)
+```
+
+```{r}
+#Importation du fichier après modification manuelle
+data_o<-read.csv("Datagenus.csv", header=TRUE, sep="\t") 
+data <- data_o[, -31] # Supprimer la colonne "forest" du tableau
+n<-length(data$code) # Nombre d'observations
+```
+
+```{r}
+data[, c(29:42,66,67)]
+```

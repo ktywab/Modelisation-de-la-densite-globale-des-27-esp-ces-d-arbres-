@@ -1,0 +1,1083 @@
+```{r}
+library(ade4)
+library(ClustOfVar)
+library(pls)
+library(glmnet)
+library(factoextra)
+library(Factoshiny)
+library(tidyverse)
+library(corrplot)
+library(gridExtra)
+library(grid)       # Pour ajouter le titre commun
+library(openxlsx)
+library(reshape2)
+```
+
+```{r}
+Datagenus <- read.delim2("C:/Users/toshiba/Desktop/M2_stat/Analyse multivarié/TP-20241012/Datagenus.csv", header=TRUE)
+
+Datagenus  = Datagenus %>% select(-forest,-code)
+
+head(Datagenus)
+```
+
+### Question1
+
+### a)
+
+```{r}
+colonnes_especes <- paste0("gen", 1:27)
+# Calcul de l'abondance totale des 27 espèces pour chaque parcelle
+Datagenus$abondance_totale <- rowSums(Datagenus[colonnes_especes], na.rm=TRUE)
+
+# Calcul de la densité de peuplement arboré en divisant par la surface
+Datagenus$density <- Datagenus$abondance_totale /Datagenus$surface
+
+head(Datagenus[,c('surface','density')])
+```
+
+### b)
+
+```{r}
+#### Centrage et réduction avant de calculer les interactions
+n = length(Datagenus$density)
+# Sélection des variables géographiques quantitatives et des indices EVI
+variables_geo <- grep("^(altitude|pluvio|lon|lat)", colnames(Datagenus), value=TRUE)
+variables_evi <- grep("^evi_", colnames(Datagenus), value=TRUE)
+
+# Centre et réduit les variables en utilisant la variance corrigée (variance de l'échantillon)
+Datagenus[,variables_geo] <- scale(Datagenus[variables_geo], center=TRUE, scale=TRUE) #* sqrt(n/(n-1))
+
+Datagenus[,variables_evi] <- scale(Datagenus[variables_evi], center=TRUE, scale=TRUE) #* sqrt(n/(n-1))
+
+####Interaction
+# Conversion de la variable geology en indicatrices
+Datagenus_geology <- acm.disjonctif(Datagenus["geology"])
+
+# Fusion des nouvelles indicatrices dans le dataframe principal
+Datagenus <- cbind(Datagenus, Datagenus_geology)
+
+# Créer les interactions entre les variables géographiques quantitatives et les indicatrices de geology
+
+variables_geology <- colnames(Datagenus_geology)
+
+for (geo_var in variables_geo) {
+  for (geo_indic in variables_geology) {
+    interaction_name <- paste(geo_var, geo_indic, sep = "_")
+    Datagenus[[interaction_name]] <- Datagenus[[geo_var]] * Datagenus[[geo_indic]]
+  }
+}
+
+head(Datagenus)
+```
+
+```{r}
+# Reprendre toutes les variables explicatives : géographiques, EVI, geology et interactions
+variables_explicatives <- c(variables_geo, variables_evi, variables_geology, colnames(Datagenus)[grepl("_(geology)", colnames(Datagenus))])
+
+# Calculer la matrice de corrélation pour toutes les variables explicatives (y compris les interactions)
+matrice_correlation <- cor(Datagenus[, variables_explicatives], use="complete.obs")
+
+# Afficher le graphique de corrélation avec une taille de police réduite
+corrplot(matrice_correlation, method="color", tl.cex=0.33)
+
+```
+
+### Question 2
+
+```{r}
+# Réaliser l'ACP sur les variables explicatives
+acp_resultat <- PCA(Datagenus[, variables_explicatives], scale.unit=FALSE, graph=FALSE)
+
+# Visualiser l'éboulis d'inertie avec fviz_eig
+fviz_eig(acp_resultat, addlabels = TRUE, ylim = c(0, 50))
+
+```
+
+On remarque l'apparition d'un coude à la 4 ième composante. Cela nous indique de retenir 4 composantes principales qui capture l'éssentiel de la varaince.
+
+À 4 composantes principales, il ya au moins 65% de la variance expliqué. Cela devrais permettre d'avoir un bon compromis entre le bruit et l'information utile.
+
+#### Modèle RCP
+
+```{r}
+# Extraire les premières 4 composantes principales de l'ACP
+nb_composantes_retenues <- 4
+composantes_retenues <- acp_resultat$ind$coord[, 1:nb_composantes_retenues]
+
+# Créer un dataframe avec la variable cible Y_density et les composantes
+modele_data <- data.frame(density = Datagenus$density, composantes_retenues)
+
+# Ajuster la régression linéaire
+modele_RCP <- lm(density ~ ., data = modele_data)
+
+summary(modele_RCP)
+
+
+
+```
+
+#### graphique de Y_hat en fonction de Y
+
+```{r}
+# Graphique des valeurs observées vs prédites
+valeurs_predites <- predict(modele_RCP)
+plot(Datagenus$density, valeurs_predites, 
+     xlab = "Y_density observé", ylab = "Y_density prédit", 
+     main = "Graphique des valeurs observées vs prédites")
+abline(0, 1, col = "red")
+```
+
+Le graphiqueYYYcontreY\^\chapeau{Y}Y\^montre une dispersion notable des points autour de la ligne de prediction parfaite, indiquant une prédiction approximative de la densité de peuplement. Le modèle semble sous-estimer ou surestimer certaines valeurs, ce qui laisse une variabilité importante non expliquée, cohérente avec le faibleR2R\^2R2(\~0,22).
+
+#### Coefficient des vraibles grace à la RCP
+
+```{r}
+
+# Obtenir les loadings des composantes principales retenues (contribution de chaque variable d'origine)
+loadings <- acp_resultat$var$coord[, 1:nb_composantes_retenues]
+
+# Coefficients de régression des composantes principales significatives (sans l'intercept)
+coeff_composantes <- coef(modele_RCP)[-1]  # Exclure l'intercept
+
+# Calcul des contributions des variables d'origine
+coeff_originaux <- loadings %*% coeff_composantes
+
+# Créer un dataframe avec les noms des variables et leurs coefficients d'origine
+coeff_originaux_df <- data.frame(Variable = rownames(loadings), Coefficient_d_origine = as.vector(coeff_originaux))
+coeff_originaux_df <- coeff_originaux_df[order(coeff_originaux_df$Coefficient_d_origine, decreasing = TRUE), ]
+
+coeff_originaux_df = coeff_originaux_df  %>% 
+  select(Variable,Coefficient_d_origine)
+
+write.xlsx(coeff_originaux_df, file = "coefficients_RCP.xlsx", row.names = FALSE)
+
+# Afficher les premiers résultats
+head(coeff_originaux_df)
+```
+
+#### Press du RCP simple
+
+```{r}
+# Nombre de composantes optimal pour la RCP simple trouvé précédemment
+n_composantes_optimal <- 4
+variables_explicatives_data = Datagenus[, variables_explicatives]
+# Combiner les variables explicatives et la variable cible dans un dataframe
+data_pls <- data.frame(variables_explicatives_data, density = Datagenus$density)
+
+modele_RCP <- pcr(density ~ ., data = data_pls, ncomp = n_composantes_optimal, validation = "CV", segments = 10)
+
+# Extraire le PRESS pour le nombre optimal de composantes dans la RCP simple
+press_RCP_simple <- modele_RCP$validation$PRESS[1, n_composantes_optimal]
+print(paste("Valeur de PRESS pour RCP simple avec", n_composantes_optimal, "composantes :", press_RCP_simple))
+```
+
+#### Transformation logarithmique
+
+```{r}
+# Transformation logarithmique de la densité Y_density
+Datagenus$log_density <- log(Datagenus$density + 1)  # Ajout de 1 pour éviter log(0)
+
+# Créer un dataframe avec la variable transformée et les composantes principales retenues
+modele_data_log <- data.frame(log_density = Datagenus$log_density, composantes_retenues)
+
+# Ajuster un modèle de régression linéaire avec la variable transformée
+modele_RCP_log <- lm(log_density ~ ., data = modele_data_log)
+summary_modele_log <- summary(modele_RCP_log)
+
+# Afficher le R² du modèle transformé
+R2_log <- summary_modele_log$r.squared
+print(paste("R² du modèle avec log(density) :", R2_log))
+
+# Graphique des valeurs observées vs prédites pour le modèle transformé
+valeurs_predites_log <- predict(modele_RCP_log)
+plot(Datagenus$log_density, valeurs_predites_log, 
+     xlab = "log(Y_density) observé", ylab = "log(Y_density) prédit", 
+     main = "Graphique des valeurs observées vs prédites (log-transformation)",
+     xlim = c(0, max(Datagenus$log_density)), ylim = c(0, max(valeurs_predites_log)),
+     cex.main = 0.8, cex.lab = 0.8)  # Ajuste la taille de police des titres et labels
+abline(0, 1, col = "red")
+
+```
+
+On observe une dispersion légèrement moins prononcé que dans la cas sans transformation.
+
+#### coefficient
+
+```{r}
+# Obtenir les loadings des composantes principales retenues (contribution de chaque variable d'origine)
+loadings <- acp_resultat$var$coord[, 1:nb_composantes_retenues]
+
+# Coefficients de régression des composantes principales significatives (sans l'intercept)
+coeff_composantes <- coef(modele_RCP_log)[-1]  # Exclure l'intercept
+
+# Calcul des contributions des variables d'origine
+coeff_originaux <- loadings %*% coeff_composantes
+
+# Créer un dataframe avec les noms des variables et leurs coefficients d'origine
+coeff_originaux_df <- data.frame(Variable = rownames(loadings), Coefficient_d_origine = as.vector(coeff_originaux))
+coeff_originaux_df <- coeff_originaux_df[order(coeff_originaux_df$Coefficient_d_origine, decreasing = TRUE), ]
+
+# Sélectionner uniquement les colonnes nécessaires
+coeff_originaux_df <- coeff_originaux_df %>% 
+  select(Variable, Coefficient_d_origine)
+
+# Enregistrer le dataframe des coefficients d'origine en fichier Excel
+write.xlsx(coeff_originaux_df, file = "coefficients_RCP_log.xlsx", row.names = FALSE)
+
+# Afficher les premiers résultats
+print("Les premiers coefficients d'origine du modèle log sont :")
+print(head(coeff_originaux_df))
+```
+
+#### PRESS RCP simple Log
+
+```{r}
+# Nombre de composantes optimal pour la RCP simple trouvé précédemment
+n_composantes_optimal <- 4
+
+# Transformation logarithmique de la densité
+Datagenus$log_density <- log(Datagenus$density + 1)
+
+# Préparation des données explicatives et de la variable cible transformée
+variables_explicatives_data <- Datagenus[, variables_explicatives]
+data_pls_log <- data.frame(variables_explicatives_data, log_density = Datagenus$log_density)
+
+# Ajuster un modèle PLS avec log_density comme cible
+modele_RCP_log <- plsr(log_density ~ ., data = data_pls_log, ncomp = n_composantes_optimal, validation = "CV", segments = 10)
+
+# Extraire le PRESS pour le nombre optimal de composantes dans la RCP log-transformée
+press_RCP_log <- modele_RCP_log$validation$PRESS[1, n_composantes_optimal]
+print(paste("Valeur de PRESS pour RCP log-transformée avec", n_composantes_optimal, "composantes :", press_RCP_log))
+```
+
+### Question3
+
+```{r}
+# Effectuer les ACP pour chaque thème
+variables_explicatives_data = Datagenus[,variables_explicatives]
+
+acp_photosynthese <- PCA(variables_explicatives_data[, variables_evi], scale.unit = FALSE, graph = FALSE)
+
+acp_geographie <- PCA(variables_explicatives_data[,setdiff(colnames(variables_explicatives_data), variables_evi)], scale.unit = FALSE, graph = FALSE)
+
+# Éboulis d'inertie pour l'ACP du thème Photosynthèse
+plot_photosynthese <- fviz_eig(acp_photosynthese, addlabels = TRUE, ylim = c(0, 50)) + 
+  ggtitle("Éboulis d'inertie - Photosynthèse")
+
+# Éboulis d'inertie pour l'ACP du thème Géographie
+plot_geographie <- fviz_eig(acp_geographie, addlabels = TRUE, ylim = c(0, 50)) + 
+  ggtitle("Éboulis d'inertie - Géographie")
+
+# Afficher les deux graphiques côte à côte
+grid.arrange(plot_photosynthese, plot_geographie, ncol = 2)
+```
+
+On remarque l'apparition d'un coude à la 3 ième composante des deux éboulis. Cela nous indique de retenir 3 composantes principales qui capture l'éssentiel de la varaince.
+
+#### Modele RCP sur les composantes des deux thèmes
+
+```{r}
+# 3. Sélection des composantes principales significatives pour chaque thème
+nb_composantes_photosynthese <- 3  # Ajuster selon l'éboulis d'inertie de l'ACP de photosynthèse
+nb_composantes_geographie <- 3     # Ajuster selon l'éboulis d'inertie de l'ACP de géographie
+
+composantes_photosynthese <- acp_photosynthese$ind$coord[, 1:nb_composantes_photosynthese]
+composantes_geographie <- acp_geographie$ind$coord[, 1:nb_composantes_geographie]
+
+# Combiner les composantes principales significatives des deux thèmes
+composantes_combinees <- cbind(composantes_photosynthese, composantes_geographie)
+modele_data <- data.frame(density = Datagenus$density, composantes_combinees)
+
+# 4. Reprendre la régression linéaire avec density comme variable cible
+modele_RCP_2 <- lm(density ~ ., data = modele_data)
+summary_modele <- summary(modele_RCP_2)
+
+# Afficher le R² et les tests de significativité
+R2 <- summary_modele$r.squared
+print(paste("R² du modèle avec density :", R2))
+print(summary_modele)
+
+# Graphique des valeurs observées vs prédites pour le modèle
+valeurs_predites <- predict(modele_RCP_2)
+plot(Datagenus$density, valeurs_predites, 
+     xlab = "density observé", ylab = "density prédit", 
+     main = "Graphique des valeurs observées vs prédites (composantes des deux thèmes)",
+     xlim = c(0, max(Datagenus$density)), ylim = c(0, max(valeurs_predites)),
+     cex.main = 0.8, cex.lab = 0.8)
+abline(0, 1, col = "red")
+```
+
+Le résulats n'est pas trop différent de celui de la RCP fait sur la globalité des variables.
+
+#### Coefficient des variables
+
+```{r}
+# Récupérer les loadings pour chaque thème
+loadings_photosynthese <- acp_photosynthese$var$coord[, 1:nb_composantes_photosynthese]
+loadings_geographie <- acp_geographie$var$coord[, 1:nb_composantes_geographie]
+
+# Calcul des coefficients d'origine
+coeff_photosynthese_originaux <- loadings_photosynthese %*% coef(modele_RCP)[1:nb_composantes_photosynthese]
+coeff_geographie_originaux <- loadings_geographie %*% coef(modele_RCP)[(nb_composantes_photosynthese + 1):(nb_composantes_photosynthese + nb_composantes_geographie)]
+
+# Liste des noms des variables pour chaque thème
+variables_geographie <- setdiff(colnames(variables_explicatives_data), variables_evi)
+
+# Afficher les coefficients des variables originales
+coeff_photosynthese_df <- data.frame(Coefficient_Photosynthese = coeff_photosynthese_originaux, row.names = variables_evi)
+coeff_geographie_df <- data.frame(Coefficient_Geographie = coeff_geographie_originaux, row.names = variables_geographie)
+
+# Afficher les dataframes
+print(coeff_photosynthese_df)
+print(coeff_geographie_df)
+
+# Ajouter une colonne pour les noms des variables afin de les utiliser pour empiler les dataframes
+coeff_photosynthese_df$Variable <- rownames(coeff_photosynthese_df)
+coeff_geographie_df$Variable <- rownames(coeff_geographie_df)
+
+# Ajouter une colonne "Thème" pour identifier chaque coefficient comme appartenant à Photosynthèse ou Géographie
+coeff_photosynthese_df$Thème <- "Photosynthèse"
+coeff_geographie_df$Thème <- "Géographie"
+
+# Renommer les colonnes de coefficient pour qu'elles soient cohérentes
+colnames(coeff_photosynthese_df)[1] <- "Coefficient"
+colnames(coeff_geographie_df)[1] <- "Coefficient"
+
+# Combiner les deux dataframes en les empilant (rbind)
+coefficients_RCP_theme <- rbind(coeff_photosynthese_df, coeff_geographie_df)
+
+# Réorganiser les colonnes pour que "Variable" soit en première position
+coefficients_RCP_theme <- coefficients_RCP_theme[, c("Variable", "Coefficient", "Thème")]
+
+coefficients_RCP_theme = coefficients_RCP_theme %>%
+  select(-Thème)
+
+# Afficher le dataframe combiné
+print("Dataframe combiné des coefficients des thèmes Photosynthèse et Géographie :")
+print(head(coefficients_RCP_theme))
+
+# Enregistrer le dataframe combiné en fichier texte
+write.xlsx(coefficients_RCP_theme, file = "coefficients_RCP_theme.xlsx", row.names = FALSE)
+
+print("Le fichier coefficients_RCP_theme.txt a été enregistré dans le répertoire de travail.")
+
+```
+
+\
+
+#### Press pour RCP à thème
+
+```{r}
+#Partition des variables explicatives par thème
+variables_photosynthese <- grep("^evi_", colnames(variables_explicatives_data), value = TRUE)
+
+variables_geographie <- setdiff(colnames(variables_explicatives_data), variables_photosynthese)
+
+# Créer les données pour la RCP par thème avec les composantes principales des deux thèmes
+data_RCP_theme <- data.frame(composantes_photosynthese, composantes_geographie, density = Datagenus$density)
+
+
+# Modèle PLS pour la RCP par thème en utilisant les nombres optimaux de composantes pour chaque thème
+modele_RCP_theme <- pcr(density ~ ., data = data_RCP_theme, ncomp = (nb_composantes_photosynthese + nb_composantes_geographie), validation = "CV", segments = 10)
+
+# Extraire le PRESS pour le nombre optimal de composantes dans la RCP par thème
+press_RCP_theme <- modele_RCP_theme$validation$PRESS[1, nb_composantes_photosynthese + nb_composantes_geographie]
+print(paste("Valeur de PRESS pour RCP par thème avec", nb_composantes_photosynthese + nb_composantes_geographie, "composantes :", press_RCP_theme))
+```
+
+### RCP thème log
+
+```{r}
+# Transformation logarithmique de la variable cible
+Datagenus$log_density <- log(Datagenus$density + 1)
+
+# Sélection des composantes principales significatives pour chaque thème
+nb_composantes_photosynthese <- 3  # Ajuster selon l'éboulis d'inertie de l'ACP de photosynthèse
+nb_composantes_geographie <- 3     # Ajuster selon l'éboulis d'inertie de l'ACP de géographie
+
+composantes_photosynthese <- acp_photosynthese$ind$coord[, 1:nb_composantes_photosynthese]
+composantes_geographie <- acp_geographie$ind$coord[, 1:nb_composantes_geographie]
+
+# Combiner les composantes principales significatives des deux thèmes
+composantes_combinees <- cbind(composantes_photosynthese, composantes_geographie)
+modele_data <- data.frame(log_density = Datagenus$log_density, composantes_combinees)
+
+# Régression linéaire avec log_density comme variable cible
+modele_RCP_log <- lm(log_density ~ ., data = modele_data)
+summary_modele_log <- summary(modele_RCP_log)
+
+# Afficher le R² et les tests de significativité
+R2_log <- summary_modele_log$r.squared
+print(paste("R² du modèle avec log_density :", R2_log))
+print(summary_modele_log)
+
+# Graphique des valeurs observées vs prédites pour le modèle log
+valeurs_predites_log <- predict(modele_RCP_log)
+plot(Datagenus$log_density, valeurs_predites_log, 
+     xlab = "log(density) observé", ylab = "log(density) prédit", 
+     main = "Graphique des valeurs observées vs prédites (composantes des deux thèmes avec log)",
+     xlim = c(0, max(Datagenus$log_density)), ylim = c(0, max(valeurs_predites_log)),
+     cex.main = 0.8, cex.lab = 0.8)
+abline(0, 1, col = "red")
+
+```
+
+#### Coefficient des variables 
+
+```{r}
+# Calcul des coefficients d'origine
+coeff_photosynthese_originaux <- loadings_photosynthese %*% coef(modele_RCP_log)[2:(nb_composantes_photosynthese + 1)]
+coeff_geographie_originaux <- loadings_geographie %*% coef(modele_RCP_log)[(nb_composantes_photosynthese + 2):(nb_composantes_photosynthese + nb_composantes_geographie + 1)]
+
+# Liste des noms des variables pour chaque thème
+variables_geographie <- setdiff(colnames(variables_explicatives_data), variables_evi)
+
+# Afficher les coefficients des variables originales
+coeff_photosynthese_df <- data.frame(Coefficient_Photosynthese = coeff_photosynthese_originaux, row.names = variables_evi)
+coeff_geographie_df <- data.frame(Coefficient_Geographie = coeff_geographie_originaux, row.names = variables_geographie)
+
+# Ajouter une colonne pour les noms des variables afin de les utiliser pour empiler les dataframes
+coeff_photosynthese_df$Variable <- rownames(coeff_photosynthese_df)
+coeff_geographie_df$Variable <- rownames(coeff_geographie_df)
+
+# Ajouter une colonne "Thème" pour identifier chaque coefficient comme appartenant à Photosynthèse ou Géographie
+coeff_photosynthese_df$Thème <- "Photosynthèse"
+coeff_geographie_df$Thème <- "Géographie"
+
+# Renommer les colonnes de coefficient pour qu'elles soient cohérentes
+colnames(coeff_photosynthese_df)[1] <- "Coefficient"
+colnames(coeff_geographie_df)[1] <- "Coefficient"
+
+# Combiner les deux dataframes en les empilant (rbind)
+coefficients_RCP_theme <- rbind(coeff_photosynthese_df, coeff_geographie_df)
+
+# Réorganiser les colonnes pour que "Variable" soit en première position
+coefficients_RCP_theme <- coefficients_RCP_theme[, c("Variable", "Coefficient", "Thème")]
+
+# Afficher le dataframe combiné
+print("Dataframe combiné des coefficients des thèmes Photosynthèse et Géographie :")
+print(head(coefficients_RCP_theme))
+
+# Enregistrer le dataframe combiné en fichier Excel
+write.xlsx(coefficients_RCP_theme, file = "coefficients_RCP_theme_log.xlsx", row.names = FALSE)
+
+print("Le fichier coefficients_RCP_theme.xlsx a été enregistré dans le répertoire de travail.")
+```
+
+### RCP press thème log
+
+```{r}
+composantes_photosynthese <- acp_photosynthese$ind$coord[, 1:nb_composantes_photosynthese]
+composantes_geographie <- acp_geographie$ind$coord[, 1:nb_composantes_geographie]
+
+# Combiner les composantes principales significatives des deux thèmes
+composantes_combinees <- cbind(composantes_photosynthese, composantes_geographie)
+modele_data <- data.frame(log_density = Datagenus$log_density, composantes_combinees)
+
+# Ajuster un modèle PLS avec validation croisée
+modele_PLS_log <- plsr(log_density ~ ., data = modele_data, ncomp = (nb_composantes_photosynthese + nb_composantes_geographie), validation = "CV", segments = 10)
+
+# Extraire la valeur de PRESS pour le modèle optimal (nombre de composantes combinées)
+n_composantes_total <- nb_composantes_photosynthese + nb_composantes_geographie
+press_log <- modele_PLS_log$validation$PRESS[1, n_composantes_total]
+
+# Afficher la valeur de PRESS
+print(paste("Valeur de PRESS pour le modèle log avec", n_composantes_total, "composantes :", press_log))
+```
+
+### Regression PLS
+
+```{r}
+
+# Fixer la graine pour assurer la reproductibilité
+set.seed(123)
+
+# Régression PLS avec validation croisée pour déterminer le nombre optimal de composantes
+modele_PLS <- plsr(density ~ ., data = data_pls, validation = "CV", segments = 10)
+
+# Extraire les valeurs de PRESS pour chaque nombre de composantes
+press_values <- modele_PLS$validation$PRESS[1, ]
+
+# Identifier le nombre optimal de composantes (minimisant PRESS)
+n_composantes_optimal <- which.min(press_values)
+press_optimal <- press_values[n_composantes_optimal]  # Valeur optimale de PRESS
+
+
+# Tracer le graphique de PRESS en fonction du nombre de composantes
+plot(1:length(press_values), press_values, type = "b", pch = 20, col = "blue",
+     xlab = "Nombre de composantes", ylab = "Erreur de prédiction (PRESS)",
+     main = "Erreur de prédiction en fonction du nombre de composantes")
+abline(v = n_composantes_optimal, col = "red", lty = 2)  # Ligne verticale pour le nombre optimal de composantes
+legend("topright", legend = paste("Composantes optimales =", n_composantes_optimal), col = "red", lty = 2)
+
+# Afficher le nombre optimal de composantes et la valeur de PRESS optimale
+print(paste("Nombre optimal de composantes :", n_composantes_optimal))
+print(paste("Valeur minimale de PRESS pour le nombre optimal de composantes :", press_optimal))
+
+# Obtenir les coefficients des variables d'origine dans le modèle optimal
+coefficients_PLS <- coef(modele_PLS, ncomp = n_composantes_optimal)
+print(coefficients_PLS)
+
+```
+
+### Coefficient PLS
+
+```{r}
+# Obtenir les coefficients des variables d'origine dans le modèle optimal
+coefficients_PLS <- coef(modele_PLS, ncomp = n_composantes_optimal)
+
+# Convertir les coefficients en un dataframe avec les noms des variables
+coefficients_df_PLS <- as.data.frame(coefficients_PLS)
+colnames(coefficients_df_PLS) <- "Coefficient"
+#rownames(coefficients_df) <- rownames(variables_explicatives_data)
+
+
+# Enregistrer le dataframe en fichier texte
+write.xlsx(coefficients_df_PLS, file = "coefficients_PLS.xlsx", row.names = TRUE)
+
+# Afficher le dataframe des coefficients
+head(coefficients_df_PLS)
+```
+
+### Pls avec transformation log
+
+```{r}
+
+# Fixer la graine pour assurer la reproductibilité
+set.seed(123)
+
+# Transformation logarithmique de la variable cible
+data_pls$log_density <- log(data_pls$density + 1)  # Ajout de 1 pour éviter log(0)
+
+# Exclure la colonne 'density' du dataframe utilisé pour la régression PLS
+data_pls_exp <- data_pls[, !colnames(data_pls) %in% "density"]
+
+# Régression PLS avec validation croisée pour déterminer le nombre optimal de composantes
+modele_PLS_log <- plsr(log_density ~ ., data = data_pls_exp, validation = "CV", segments = 10)
+
+# Extraire les valeurs de PRESS pour chaque nombre de composantes
+press_values_log <- modele_PLS_log$validation$PRESS[1, ]
+
+# Identifier le nombre optimal de composantes (minimisant PRESS)
+n_composantes_optimal_log <- which.min(press_values_log)
+press_optimal_log <- press_values_log[n_composantes_optimal_log]  # Valeur optimale de PRESS
+
+# Tracer le graphique de PRESS en fonction du nombre de composantes pour la transformation logarithmique
+plot(1:length(press_values_log), press_values_log, type = "b", pch = 20, col = "blue",
+     xlab = "Nombre de composantes", ylab = "Erreur de prédiction (PRESS)",
+     main = "Erreur de prédiction en fonction du nombre de composantes (log)")
+abline(v = n_composantes_optimal_log, col = "red", lty = 2)  # Ligne verticale pour le nombre optimal de composantes
+legend("topright", legend = paste("Composantes optimales =", n_composantes_optimal_log), col = "red", lty = 2)
+
+# Afficher le nombre optimal de composantes et la valeur de PRESS optimale pour le modèle log
+print(paste("Nombre optimal de composantes (log) :", n_composantes_optimal_log))
+print(paste("Valeur minimale de PRESS pour le nombre optimal de composantes (log) :", press_optimal_log))
+
+# Obtenir les coefficients des variables d'origine dans le modèle optimal pour log(density)
+coefficients_PLS_log <- coef(modele_PLS_log, ncomp = n_composantes_optimal_log)
+
+# Convertir les coefficients en un data frame avec les noms des variables
+coefficients_df_PLS_log <- as.data.frame(coefficients_PLS_log)
+colnames(coefficients_df_PLS_log) <- "Coefficient"
+coefficients_df_PLS_log$Variable <- rownames(coefficients_df_PLS_log)
+
+# Réorganiser les colonnes pour avoir les noms des variables en première position
+coefficients_df_PLS_log <- coefficients_df_PLS_log[, c("Variable", "Coefficient")]
+
+# Enregistrer le dataframe en fichier Excel
+write.xlsx(coefficients_df_PLS_log, file = "coefficients_PLS_log.xlsx", row.names = FALSE)
+
+# Afficher les premiers résultats du dataframe
+print("Dataframe des coefficients originaux du modèle PLS (log) :")
+print(head(coefficients_df_PLS_log))
+
+```
+
+#### Valeur predite en fonction des valeur observé
+
+```{r}
+# Obtenir les prédictions pour le modèle PLS avec la transformation logarithmique
+predictions_PLS_log <- predict(modele_PLS_log, ncomp = n_composantes_optimal_log, newdata = data_pls)
+
+# Tracer le graphique des valeurs prédites en fonction des valeurs observées avec des anneaux noirs
+plot(y_log, predictions_PLS_log, 
+     main = "Ajustement des Prédictions vs Valeurs Observées (PLS - Log)",
+     xlab = "Valeurs Observées (log(y + 1))",
+     ylab = "Prédictions",
+     col = "black", pch = 1, cex.main = 0.8)  # cex.main pour réduire la taille du titre
+abline(a = 0, b = 1, col = "red", lty = 2)  # Ligne y = x pour référence
+```
+
+```{r}
+
+predictions_PLS <- predict(modele_PLS, ncomp = n_composantes_optimal, newdata = data_pls)
+
+# Calcul du R²
+sst <- sum((data_pls$density - mean(data_pls$density))^2)  # Somme totale des carrés
+sse <- sum((data_pls$density - predictions_PLS)^2)         # Somme des carrés des erreurs
+r_squared <- 1 - (sse / sst)
+print(paste("R² pour le modèle PLS avec", n_composantes_optimal, "composantes :", round(r_squared, 4)))
+
+```
+
+```{r}
+y_log <- log(Datagenus$density + 1)  # Transformation logarithmique de la variable cible
+# Calcul du R² pour le modèle PLS avec la transformation log
+# y_log représente log(data_pls$density + 1)
+
+# Obtenir les prédictions pour le modèle PLS log
+predictions_PLS_log <- predict(modele_PLS_log, ncomp = n_composantes_optimal_log, newdata = data_pls)
+
+# Calcul du R²
+sst_log <- sum((y_log - mean(y_log))^2)  # Somme totale des carrés pour y_log
+sse_log <- sum((y_log - predictions_PLS_log)^2)  # Somme des carrés des erreurs pour y_log
+r_squared_log <- 1 - (sse_log / sst_log)
+
+print(paste("R² pour la régression PLS avec transformation log :", round(r_squared_log, 4)))
+
+```
+
+#### Graphe de corrélation des varibles avec les composantes pls
+
+```{r}
+# Extraire les scores des deux premières composantes
+scores_PLS_log <- modele_PLS_log$scores[, 1:2]
+
+# Calculer la corrélation entre chaque variable explicative et les deux premières composantes
+correlations <- cor(data_pls[ , -which(names(data_pls) %in% c("density", "log_density"))], scores_PLS_log)
+
+# Transformer les corrélations en un data frame pour un graphique en barres
+correlations_df <- as.data.frame(correlations)
+colnames(correlations_df) <- c("Comp1", "Comp2")
+correlations_df$Variables <- rownames(correlations_df)
+
+# Graphique en barres pour Comp1
+plot_comp1 <- ggplot(correlations_df, aes(x = Variables, y = Comp1)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(
+         x = "Variables",
+         y = "Corrélation avec Comp1") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6))  # Texte des variables en vertical
+
+# Graphique en barres pour Comp2
+plot_comp2 <- ggplot(correlations_df, aes(x = Variables, y = Comp2)) +
+    geom_bar(stat = "identity", fill = "darkorange") +
+    labs(
+         x = "Variables",
+         y = "Corrélation avec Comp2") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 5.5))  # Texte des variables en vertical
+
+# Afficher les deux graphiques côte à côte
+grid.arrange(plot_comp1, plot_comp2, ncol = 2)
+```
+
+```{r}
+# Extraire les scores des composantes 3 et 4
+scores_PLS_log <- modele_PLS_log$scores[, 3:4]
+
+# Calculer la corrélation entre chaque variable explicative et les composantes 3 et 4
+correlations <- cor(data_pls[ , -which(names(data_pls) %in% c("density", "log_density"))], scores_PLS_log)
+
+# Transformer les corrélations en un data frame pour un graphique en barres
+correlations_df <- as.data.frame(correlations)
+colnames(correlations_df) <- c("Comp3", "Comp4")
+correlations_df$Variables <- rownames(correlations_df)
+
+# Graphique en barres pour Comp3
+plot_comp3 <- ggplot(correlations_df, aes(x = Variables, y = Comp3)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(
+         x = "Variables",
+         y = "Corrélation avec Comp3") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6))  # Texte des variables en vertical
+
+# Graphique en barres pour Comp4
+plot_comp4 <- ggplot(correlations_df, aes(x = Variables, y = Comp4)) +
+    geom_bar(stat = "identity", fill = "darkorange") +
+    labs(
+         x = "Variables",
+         y = "Corrélation avec Comp4") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 5.5))  # Texte des variables en vertical
+
+# Afficher les deux graphiques côte à côte
+grid.arrange(plot_comp3, plot_comp4, ncol = 2)
+
+```
+
+```{r}
+# Extraire les scores des composantes 5 et 6
+scores_PLS_log <- modele_PLS_log$scores[, 5:6]
+
+# Calculer la corrélation entre chaque variable explicative et les composantes 5 et 6
+correlations <- cor(data_pls[ , -which(names(data_pls) %in% c("density", "log_density"))], scores_PLS_log)
+
+# Transformer les corrélations en un data frame pour un graphique en barres
+correlations_df <- as.data.frame(correlations)
+colnames(correlations_df) <- c("Comp5", "Comp6")
+correlations_df$Variables <- rownames(correlations_df)
+
+# Graphique en barres pour Comp5
+plot_comp5 <- ggplot(correlations_df, aes(x = Variables, y = Comp5)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(
+         x = "Variables",
+         y = "Corrélation avec Comp5") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6))  # Texte des variables en vertical
+
+# Graphique en barres pour Comp6
+plot_comp6 <- ggplot(correlations_df, aes(x = Variables, y = Comp6)) +
+    geom_bar(stat = "identity", fill = "darkorange") +
+    labs(
+         x = "Variables",
+         y = "Corrélation avec Comp6") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 5.5))  # Texte des variables en vertical
+
+# Afficher les deux graphiques côte à côte
+grid.arrange(plot_comp5, plot_comp6, ncol = 2)
+
+```
+
+### coefficient du modèle 
+
+```{r}
+# Obtenir les coefficients des variables d'origine dans le modèle PLS optimal
+coefficients_PLS_log <- coef(modele_PLS_log, ncomp = n_composantes_optimal_log)
+
+# Convertir les coefficients en un data frame avec les noms des variables
+coefficients_df_PLS_log <- as.data.frame(coefficients_PLS_log)
+colnames(coefficients_df_PLS_log) <- "Coefficient"
+coefficients_df_PLS_log$Variable <- rownames(coefficients_df_PLS_log)
+
+# Réorganiser les colonnes pour avoir les noms des variables en première position
+coefficients_df_PLS_log <- coefficients_df_PLS_log[, c("Variable", "Coefficient")]
+
+# Enregistrer le dataframe en fichier Excel
+write.xlsx(coefficients_df_PLS_log, file = "coefficients_PLS_log.xlsx", row.names = FALSE)
+
+# Afficher les premiers résultats du dataframe
+print("Dataframe des coefficients originaux du modèle PLS (log) :")
+print(coefficients_df_PLS_log)
+```
+
+#### Regression pénalisé
+
+#### ridge
+
+```{r}
+
+X <- as.matrix(variables_explicatives_data)  # Variables explicatives en matrice
+y <- Datagenus$density  # Variable cible
+
+# Fixer la graine pour assurer la reproductibilité
+set.seed(123)
+
+# Modèle de régression Ridge avec validation croisée pour déterminer le meilleur lambda
+modele_ridge <- cv.glmnet(X, y, alpha = 0, nfolds = 10)  # alpha = 0 pour Ridge
+
+# Lambda optimal pour Ridge
+lambda_optimal_ridge <- modele_ridge$lambda.min
+print(paste("Lambda optimal pour la régression Ridge :", lambda_optimal_ridge))
+
+# Obtenir les prédictions pour le lambda optimal
+predictions_ridge <- predict(modele_ridge, s = lambda_optimal_ridge, newx = X)
+
+# Calcul du R² pour Ridge
+sse_ridge <- sum((y - predictions_ridge)^2)  # Somme des carrés des erreurs
+r_squared_ridge <- 1 - (sse_ridge / sst)
+print(paste("R² pour la régression Ridge :", round(r_squared_ridge, 4)))
+
+# Extraire les coefficients pour le lambda optimal et les convertir en dataframe
+coefficients_ridge <- as.data.frame(as.matrix(coef(modele_ridge, s = lambda_optimal_ridge)))
+colnames(coefficients_ridge) <- "Coefficient_Ridge"
+print("Coefficients de la régression Ridge :")
+print(coefficients_ridge)
+
+# Tracer la validation croisée pour visualiser l'effet de lambda pour Ridge
+plot(modele_ridge)
+abline(v = log(lambda_optimal_ridge), col = "red", lty = 2)
+legend("topright", legend = paste("Lambda optimal =", round(lambda_optimal_ridge, 4)), col = "red", lty = 2)
+
+```
+
+### Ridge avec le log
+
+```{r}
+
+
+# Fixer la graine pour la reproductibilité
+set.seed(123)
+
+# Modèle de régression Ridge avec validation croisée pour déterminer le meilleur lambda
+modele_ridge_log <- cv.glmnet(X, y_log, alpha = 0, nfolds = 10)  # alpha = 0 pour Ridge
+
+# Lambda optimal pour Ridge
+lambda_optimal_ridge_log <- modele_ridge_log$lambda.min
+print(paste("Lambda optimal pour la régression Ridge (log) :", lambda_optimal_ridge_log))
+
+# Obtenir les prédictions pour le lambda optimal
+predictions_ridge_log <- predict(modele_ridge_log, s = lambda_optimal_ridge_log, newx = X)
+
+# Calcul du R² pour Ridge avec y_log
+sst_log <- sum((y_log - mean(y_log))^2)  # Somme totale des carrés pour y_log
+sse_ridge_log <- sum((y_log - predictions_ridge_log)^2)  # Somme des carrés des erreurs pour y_log
+r_squared_ridge_log <- 1 - (sse_ridge_log / sst_log)
+print(paste("R² pour la régression Ridge (log) :", round(r_squared_ridge_log, 4)))
+
+# Extraire les coefficients pour le lambda optimal et les convertir en dataframe
+coefficients_ridge_log <- as.data.frame(as.matrix(coef(modele_ridge_log, s = lambda_optimal_ridge_log)))
+colnames(coefficients_ridge_log) <- "Coefficient_Ridge"
+print("Coefficients de la régression Ridge (log) :")
+print(coefficients_ridge_log)
+
+# Tracer la validation croisée pour visualiser l'effet de lambda pour Ridge (log)
+plot(modele_ridge_log)
+abline(v = log(lambda_optimal_ridge_log), col = "red", lty = 2)
+legend("topright", legend = paste("Lambda optimal =", round(lambda_optimal_ridge_log, 4)), col = "red", lty = 2)
+```
+
+### Grapjique de l'ajustement
+
+```{r}
+predictions_ridge <- predict(modele_ridge, s = lambda_optimal_ridge, newx = X)
+
+predictions_ridge_log <- predict(modele_ridge_log, s = lambda_optimal_ridge_log, newx = X)
+
+# Définir une disposition de 1 ligne et 2 colonnes pour les graphiques
+par(mfrow = c(1, 2))  
+
+# Tracer le graphique d'ajustement pour y en échelle linéaire
+plot(y, predictions_ridge, 
+     xlab = "Valeurs Observées (y)",
+     ylab = "Prédictions (ŷ)",
+     col = "blue", pch = 16)
+abline(a = 0, b = 1, col = "red", lty = 1)
+
+# Tracer le graphique d'ajustement pour y en échelle logarithmique
+plot(y_log, predictions_ridge_log, 
+     xlab = "Valeurs Observées (log(y + 1))",
+     ylab = "Prédictions (log(ŷ + 1))",
+     col = "green", pch = 16)
+abline(a = 0, b = 1, col = "red", lty = 1)
+
+# Ajouter un titre global
+mtext("Ajustement des Prédictions vs Valeurs Observées (Ridge)", outer = TRUE, line = -2, cex = 1.5)
+
+```
+
+#### Lasso
+
+```{r}
+# Fixer la graine pour assurer la reproductibilité
+set.seed(123)
+# Modèle de régression Lasso avec validation croisée pour déterminer le meilleur lambda
+modele_lasso <- cv.glmnet(X, y, alpha = 1, nfolds = 10)  # alpha = 1 pour Lasso
+
+# Lambda optimal pour Lasso
+lambda_optimal_lasso <- modele_lasso$lambda.min
+print(paste("Lambda optimal pour la régression Lasso :", lambda_optimal_lasso))
+
+# Obtenir les prédictions pour le lambda optimal
+predictions_lasso <- predict(modele_lasso, s = lambda_optimal_lasso, newx = X)
+
+# Calcul du R² pour Lasso
+sst <- sum((y - mean(y))^2)  # Somme totale des carrés
+sse_lasso <- sum((y - predictions_lasso)^2)  # Somme des carrés des erreurs
+r_squared_lasso <- 1 - (sse_lasso / sst)
+print(paste("R² pour la régression Lasso :", round(r_squared_lasso, 4)))
+
+# Extraire les coefficients pour le lambda optimal et les convertir en dataframe
+coefficients_lasso <- as.data.frame(as.matrix(coef(modele_lasso, s = lambda_optimal_lasso)))
+colnames(coefficients_lasso) <- "Coefficient_Lasso"
+print("Coefficients de la régression Lasso :")
+print(coefficients_lasso)
+
+# Tracer la validation croisée pour visualiser l'effet de lambda pour Lasso
+plot(modele_lasso)
+abline(v = log(lambda_optimal_lasso), col = "red", lty = 2)
+legend("topright", legend = paste("Lambda optimal =", round(lambda_optimal_lasso, 4)), col = "red", lty = 2)
+
+
+# Tracer l'évolution des coefficients en fonction de lambda pour Lasso
+lasso_model <- glmnet(X, y, alpha = 1)  # Modèle Lasso sans validation croisée pour tracer la trajectoire
+plot(lasso_model, xvar = "lambda", label = TRUE)
+abline(v = log(lambda_optimal_lasso), col = "red", lty = 2)
+legend("topright", legend = "Lambda optimal", col = "red", lty = 2)
+title("Trajectoire des Coefficients en fonction de Lambda (Lasso)")
+```
+
+### Lasso log
+
+```{r}
+# Modèle de régression Lasso avec validation croisée pour déterminer le meilleur lambda
+modele_lasso_log <- cv.glmnet(X, y_log, alpha = 1, nfolds = 10)  # alpha = 1 pour Lasso
+
+# Lambda optimal pour Lasso
+lambda_optimal_lasso_log <- modele_lasso_log$lambda.min
+print(paste("Lambda optimal pour la régression Lasso (log) :", lambda_optimal_lasso_log))
+
+# Obtenir les prédictions pour le lambda optimal
+predictions_lasso_log <- predict(modele_lasso_log, s = lambda_optimal_lasso_log, newx = X)
+
+# Calcul du R² pour Lasso avec y_log
+sst_log <- sum((y_log - mean(y_log))^2)  # Somme totale des carrés pour y_log
+sse_lasso_log <- sum((y_log - predictions_lasso_log)^2)  # Somme des carrés des erreurs pour y_log
+r_squared_lasso_log <- 1 - (sse_lasso_log / sst_log)
+print(paste("R² pour la régression Lasso (log) :", round(r_squared_lasso_log, 4)))
+
+# Extraire les coefficients pour le lambda optimal et les convertir en dataframe
+coefficients_lasso_log <- as.data.frame(as.matrix(coef(modele_lasso_log, s = lambda_optimal_lasso_log)))
+colnames(coefficients_lasso_log) <- "Coefficient_Lasso"
+print("Coefficients de la régression Lasso (log) :")
+print(coefficients_lasso_log)
+
+# Tracer la validation croisée pour visualiser l'effet de lambda pour Lasso (log)
+plot(modele_lasso_log)
+abline(v = log(lambda_optimal_lasso_log), col = "red", lty = 2)
+legend("topright", legend = paste("Lambda optimal =", round(lambda_optimal_lasso_log, 4)), col = "red", lty = 2)
+
+# Tracer l'évolution des coefficients en fonction de lambda pour Lasso (log)
+lasso_model_log <- glmnet(X, y_log, alpha = 1)  # Modèle Lasso sans validation croisée pour tracer la trajectoire
+plot(lasso_model_log, xvar = "lambda", label = TRUE)
+abline(v = log(lambda_optimal_lasso_log), col = "red", lty = 2)
+legend("topright", legend = "Lambda optimal", col = "red", lty = 2)
+title("Trajectoire des Coefficients en fonction de Lambda (Lasso, log)")
+```
+
+### Graphique d'ajustement des lasso
+
+```{r}
+
+predictions_lasso <- predict(modele_lasso, s = lambda_optimal_lasso, newx = X)
+
+
+predictions_lasso_log <- predict(modele_lasso_log, s = lambda_optimal_lasso_log, newx = X)
+
+# Tracer le graphique d'ajustement pour y en échelle linéaire
+# Définir une disposition de 1 ligne et 2 colonnes pour les graphiques
+par(mfrow = c(1, 2))  
+
+# Tracer le graphique d'ajustement pour y en échelle linéaire
+plot(y, predictions_lasso, 
+     xlab = "Valeurs Observées (y)",
+     ylab = "Prédictions (ŷ)",
+     col = "blue", pch = 16)
+abline(a = 0, b = 1, col = "red", lty = 2)
+
+# Tracer le graphique d'ajustement pour y en échelle logarithmique
+plot(y_log, predictions_lasso_log, 
+     xlab = "Valeurs Observées (log(y + 1))",
+     ylab = "Prédictions (log(ŷ) + 1)",
+     col = "green", pch = 16)
+abline(a = 0, b = 1, col = "red", lty = 2)
+
+# Ajouter un titre global
+mtext("Ajustement des Prédictions vs Valeurs Observées (Lasso)", outer = TRUE, line = -2, cex = 1.5)
+
+```
+
+### coefficient de tous les modèles
+
+```{r}
+# Fusionner les coefficients des modèles Lasso et Ridge dans un seul dataframe
+coefficients_comparaison <- merge(coefficients_lasso, coefficients_ridge, by = "row.names", all = TRUE)
+colnames(coefficients_comparaison)[1] <- "Variable"  # Renommer la colonne des noms de variables
+rownames(coefficients_comparaison) <- coefficients_comparaison$Variable
+coefficients_comparaison <- coefficients_comparaison[, -1]  # Supprimer la colonne "Variable" doublée en ligne
+
+# Enregistrer le dataframe en fichier texte
+write.xlsx(coefficients_comparaison, file = "coefficients_comparaison.xlsx", row.names = TRUE)
+
+# Afficher le tableau de comparaison des coefficients
+
+head(coefficients_comparaison)
+
+```
+
+#### Fonction Press
+
+```{r}
+# Fonction pour calculer le PRESS pour Lasso et Ridge avec validation croisée à 10 plis
+calculate_press <- function(X, y, model_type = c("lasso", "ridge"), optimal_lambda = NULL) {
+  model_type <- match.arg(model_type)
+  n <- length(y)
+  nfolds <- 10
+  
+  # Fixer la graine pour la reproductibilité
+  set.seed(123)
+  
+  # Assigner chaque observation à un des 10 plis de manière aléatoire
+  folds <- sample(rep(1:nfolds, length.out = n))
+  press_values <- numeric(n)
+  
+  # Validation croisée à 10 plis
+  for (fold in 1:nfolds) {
+    # Créer les ensembles d'entraînement et de validation pour ce pli
+    X_train <- as.matrix(X[folds != fold, , drop = FALSE])
+    y_train <- y[folds != fold]
+    X_val <- as.matrix(X[folds == fold, , drop = FALSE])
+    y_val <- y[folds == fold]
+    
+    if (model_type == "lasso") {
+      # Lasso : alpha = 1, nécessite un lambda optimal
+      lasso_model <- glmnet(X_train, y_train, alpha = 1, lambda = optimal_lambda)
+      predictions <- predict(lasso_model, newx = X_val)
+      
+    } else if (model_type == "ridge") {
+      # Ridge : alpha = 0, nécessite un lambda optimal
+      ridge_model <- glmnet(X_train, y_train, alpha = 0, lambda = optimal_lambda)
+      predictions <- predict(ridge_model, newx = X_val)
+    }
+    
+    # Calculer les erreurs quadratiques pour chaque observation dans le pli de validation
+    press_values[folds == fold] <- (y_val - predictions)^2
+  }
+  
+  # Calculer le PRESS total
+  press <- sum(press_values)
+  
+  return(press)
+}
+
+```
+
+#### Calcul du Press des deux modèles
+
+```{r}
+
+# Calcul du PRESS pour le modèle Lasso
+press_lasso <- calculate_press(X, y, model_type = "lasso", optimal_lambda = lambda_optimal_lasso)
+
+print(paste("PRESS pour Lasso :", press_lasso))
+
+# Calcul du PRESS pour le modèle Lasso
+press_lasso_log <- calculate_press(X, y_log, model_type = "lasso", optimal_lambda = lambda_optimal_lasso_log)
+
+print(paste("PRESS pour Lasso log :", press_lasso_log))
+
+# Calcul du PRESS pour le modèle Ridge
+press_ridge <- calculate_press(X, y, model_type = "ridge", optimal_lambda = lambda_optimal_ridge)
+print(paste("PRESS pour Ridge :", press_ridge))
+
+# Calcul du PRESS pour le modèle Ridge
+press_ridge_log <- calculate_press(X, y_log, model_type = "ridge", optimal_lambda = lambda_optimal_ridge_log)
+print(paste("PRESS pour Ridge log :", press_ridge_log))
+```
+
+\
+
+### Sérialiser le meilleur modèle
+
+```{r}
+# Recréer le modèle final avec le lambda optimal
+modele_final_ridge <- glmnet(X, y, alpha = 0, lambda = lambda_optimal_ridge)
+
+# Sérialiser et sauvegarder le modèle
+saveRDS(modele_final_ridge, file = "modele_final_ridge.rds")
+```
